@@ -5,7 +5,7 @@
   "upload_source_maps": true,
   "d1_databases": [
     {
-      "binding": "DB",
+      "binding": "ANALYTICS_DB",
       "database_id": "1853c78e-b865-4151-9c25-880c7eb5e283",
       "database_name": "frndly-analytics-db"
     }

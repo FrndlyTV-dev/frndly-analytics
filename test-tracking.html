@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Analytics Test</title>
+</head>
+<body>
+  <h1>Analytics Tracking Test</h1>
+  <button id="sendPageview">Send Pageview</button>
+  <button id="sendEvent">Send Purchase Event</button>
+  <div id="results"></div>
+
+  <script>
+    const ANALYTICS_URL = 'http://localhost:8787/track';
+
+    async function sendTracking(data) {
+      try {
+        const response = await fetch(ANALYTICS_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(data)
+        });
+
+        const result = await response.json();
+        document.getElementById('results').innerHTML +=
+          `<p style="color: green;">✓ Sent: ${JSON.stringify(data, null, 2)}</p>`;
+      } catch (error) {
+        document.getElementById('results').innerHTML +=
+          `<p style="color: red;">✗ Error: ${error.message}</p>`;
+      }
+    }
+
+    document.getElementById('sendPageview').addEventListener('click', () => {
+      sendTracking({
+        url: 'https://frndlytv.com/home',
+        referrer: 'https://google.com',
+        utm_source: 'google',
+        utm_medium: 'cpc',
+        utm_campaign: 'winter_promo'
+      });
+    });
+
+    document.getElementById('sendEvent').addEventListener('click', () => {
+      sendTracking({
+        url: 'https://frndlytv.com/checkout',
+        event_name: 'purchase',
+        event_value: 49.99,
+        metadata: { plan: 'monthly' }
+      });
+    });
+  </script>
+</body>
+</html>

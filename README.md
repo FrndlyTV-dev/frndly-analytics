@@ -14,23 +14,44 @@ This analytics system replaces GA4 with a custom solution that provides:
 
 ## Architecture
 
+### FrndlyTV's Implementation (Worker-to-Worker)
+
 ```
-Website → POST /track → Analytics Worker → D1 Database → Dashboard
+Website Client
+    ↓
+Tag Worker (tag.frndlytv.com)
+    ├─→ GTM Server (GA4 tracking)
+    └─→ Analytics Worker (frndly-analytics)
+        ↓
+    D1 Database
+        ↓
+    Real-time Dashboard
 ```
+
+This dual-tracking approach provides:
+- **GA4 tracking**: Maintains existing Google Analytics integration
+- **Custom analytics**: Real-time insights without GA4 delays
+- **Full data ownership**: Your data in your database
 
 ### Components
 
-1. **Analytics Database (D1 - SQLite)**
+1. **Tag Worker** (tag.frndlytv.com)
+   - Receives tracking events from website
+   - Forwards to both GA4 and Analytics Worker
+   - Handles cookie management and consent
+   - See `INTEGRATION-GUIDE.md` for integration details
+
+2. **Analytics Worker** (frndly-analytics)
+   - `POST /track` - Receives tracking data from Tag Worker
+   - `GET /` or `/analytics` - Serves dashboard HTML
+   - `GET /api/stats` - Returns analytics data as JSON
+
+3. **Analytics Database (D1 - SQLite)**
    - Stores pageviews with URL, referrer, UTM params, country, device type
    - Stores events (purchases, clicks) with values and metadata
    - Privacy-friendly visitor hashing (rotates daily, no PII)
 
-2. **Analytics Worker (Cloudflare Worker)**
-   - `POST /track` - Receives tracking data via HTTP
-   - `GET /` or `/analytics` - Serves dashboard HTML
-   - `GET /api/stats` - Returns analytics data as JSON
-
-3. **Dashboard**
+4. **Dashboard**
    - Real-time metrics: pageviews, visitors, sessions
    - Top pages, referrers, countries, devices
    - Event tracking with revenue
@@ -42,14 +63,18 @@ Website → POST /track → Analytics Worker → D1 Database → Dashboard
 ```
 frndly-analytics/
 ├── migrations/
-│   ├── 0001_create_comments_table.sql    # (legacy, will be replaced)
-│   └── 0002_create_analytics_tables.sql  # Analytics schema
+│   ├── 0001_create_comments_table.sql         # (legacy)
+│   └── 0002_create_analytics_tables.sql       # Analytics schema
 ├── src/
-│   ├── index.ts                          # Worker code
-│   └── renderHtml.ts                     # Dashboard HTML
-├── wrangler.json                         # Worker configuration
-├── package.json                          # Dependencies
-└── test-tracking.html                    # Test page for tracking
+│   ├── index.ts                               # Analytics worker code
+│   └── renderHtml.ts                          # Dashboard HTML
+├── tag-worker.js                              # Tag worker (reference)
+├── tag-worker-analytics-integration.js        # Integration helper functions
+├── INTEGRATION-GUIDE.md                       # Tag worker integration guide
+├── wrangler.json                              # Worker configuration
+├── package.json                               # Dependencies
+├── test-tracking.html                         # Test page for tracking
+└── tracking-snippet.js                        # Client-side tracking (alternative)
 ```
 
 ## Deployment
@@ -92,12 +117,26 @@ The worker is configured in `wrangler.json`:
 
 ## Usage
 
-### Tracking Pageviews
+### Integration via Tag Worker (FrndlyTV's Setup)
 
-Send a POST request to `/track`:
+The analytics system automatically receives data from your existing Tag Worker at `tag.frndlytv.com`. No client-side changes needed - tracking happens server-side.
+
+**How it works:**
+1. Website sends tracking data to Tag Worker
+2. Tag Worker forwards to both GA4 and Analytics Worker
+3. Analytics Worker stores data in D1 database
+4. Dashboard displays real-time metrics
+
+**See `INTEGRATION-GUIDE.md` for detailed integration instructions.**
+
+### Direct API Usage (Alternative)
+
+You can also send tracking data directly to the analytics worker:
+
+#### Tracking Pageviews
 
 ```javascript
-fetch('https://your-worker.workers.dev/track', {
+fetch('https://frndly-analytics.chris-0b8.workers.dev/track', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
@@ -114,12 +153,10 @@ fetch('https://your-worker.workers.dev/track', {
 });
 ```
 
-### Tracking Events
-
-Send events with the same endpoint:
+#### Tracking Events
 
 ```javascript
-fetch('https://your-worker.workers.dev/track', {
+fetch('https://frndly-analytics.chris-0b8.workers.dev/track', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
@@ -128,7 +165,11 @@ fetch('https://your-worker.workers.dev/track', {
     url: 'https://frndlytv.com/checkout',
     event_name: 'purchase',
     event_value: 49.99,
-    metadata: { plan: 'monthly', currency: 'USD' }
+    metadata: {
+      transaction_id: '12345',
+      plan: 'monthly',
+      currency: 'USD'
+    }
   })
 });
 ```

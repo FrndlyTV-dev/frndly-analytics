@@ -1,5 +1,55 @@
 import { renderDashboard } from "./renderHtml";
 
+// GA4 format from tag worker
+interface GA4TrackingData {
+  // Page info (GA4 format)
+  page_location?: string;
+  page_url?: string;
+  page_referrer?: string;
+  page_title?: string;
+
+  // Event info
+  event?: string;
+
+  // UTM parameters
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_content?: string;
+  utm_term?: string;
+
+  // Session/visitor
+  client_id?: string;
+  clientId?: string;
+  session_id?: string;
+  sessionId?: string;
+  user_agent?: string;
+
+  // Purchase events
+  transaction_id?: string;
+  transactionId?: string;
+  value?: number;
+  transactionTotal?: number;
+  currency?: string;
+  reference_id?: string;
+  referenceId?: string;
+  frndly_id?: string;
+  frndlyId?: string;
+  items?: any[];
+  transactionProducts?: any[];
+
+  // Custom event parameters
+  params?: any;
+
+  // Direct format (also support this for backwards compatibility)
+  url?: string;
+  referrer?: string;
+  event_name?: string;
+  event_value?: number;
+  metadata?: any;
+  visitor_id?: string;
+}
+
 interface TrackingData {
   url: string;
   referrer?: string;
@@ -79,14 +129,83 @@ function getCurrentDateSalt(): string {
   return now.toISOString().split('T')[0].replace(/-/g, '');
 }
 
+// Transform GA4 format to Analytics format
+function transformGA4ToAnalytics(ga4Data: GA4TrackingData): TrackingData {
+  // If already in direct format, use it
+  if (ga4Data.url && ga4Data.event_name) {
+    return ga4Data as TrackingData;
+  }
+
+  const analytics: TrackingData = {
+    // Required: URL (try multiple GA4 fields)
+    url: ga4Data.url || ga4Data.page_location || ga4Data.page_url || '',
+
+    // Referrer
+    referrer: ga4Data.referrer || ga4Data.page_referrer,
+
+    // UTM parameters (already in correct format)
+    utm_source: ga4Data.utm_source,
+    utm_medium: ga4Data.utm_medium,
+    utm_campaign: ga4Data.utm_campaign,
+    utm_content: ga4Data.utm_content,
+    utm_term: ga4Data.utm_term,
+
+    // Visitor/Session tracking
+    visitor_id: ga4Data.visitor_id || ga4Data.client_id || ga4Data.clientId,
+    session_id: ga4Data.session_id || ga4Data.sessionId,
+  };
+
+  // Handle events
+  const eventName = ga4Data.event_name || ga4Data.event;
+
+  if (eventName && eventName !== 'page_view') {
+    analytics.event_name = eventName;
+
+    // Handle purchase/orderCompleted events
+    if (eventName === 'purchase' || eventName === 'orderCompleted') {
+      analytics.event_value = ga4Data.event_value || ga4Data.value || ga4Data.transactionTotal;
+
+      // Store purchase metadata
+      analytics.metadata = {
+        transaction_id: ga4Data.transaction_id || ga4Data.transactionId,
+        currency: ga4Data.currency || 'USD',
+        reference_id: ga4Data.reference_id || ga4Data.referenceId,
+        frndly_id: ga4Data.frndly_id || ga4Data.frndlyId,
+        items: ga4Data.items || ga4Data.transactionProducts || [],
+      };
+    } else {
+      // For other events, use params or existing metadata
+      analytics.event_value = ga4Data.event_value || ga4Data.value;
+      analytics.metadata = ga4Data.metadata || ga4Data.params;
+    }
+  }
+
+  return analytics;
+}
+
 // POST /track handler
 async function handleTrack(request: Request, env: Env, corsHeaders: any): Promise<Response> {
-  const data: TrackingData = await request.json();
+  // Accept raw data from tag worker (GA4 format)
+  const rawData: GA4TrackingData = await request.json();
+
+  // Transform GA4 format to analytics format
+  const data: TrackingData = transformGA4ToAnalytics(rawData);
+
+  // Validate required fields
+  if (!data.url) {
+    return new Response(JSON.stringify({ error: 'URL is required' }), {
+      status: 400,
+      headers: {
+        'content-type': 'application/json',
+        ...corsHeaders,
+      },
+    });
+  }
 
   // Get visitor information from headers
   const cfData = request.cf as any;
   const country = cfData?.country || 'Unknown';
-  const userAgent = request.headers.get('User-Agent') || '';
+  const userAgent = request.headers.get('User-Agent') || rawData.user_agent || '';
   const deviceType = getDeviceType(userAgent);
 
   // Generate privacy-friendly hashes
@@ -98,6 +217,13 @@ async function handleTrack(request: Request, env: Env, corsHeaders: any): Promis
   const sessionHash = await generateHash(sessionSource, 'session');
 
   const timestamp = Math.floor(Date.now() / 1000);
+
+  console.log('Analytics tracking:', {
+    event: data.event_name || 'pageview',
+    url: data.url,
+    visitor_hash: visitorHash.substring(0, 8) + '...',
+    session_hash: sessionHash.substring(0, 8) + '...',
+  });
 
   // If it's an event, store in events table
   if (data.event_name) {

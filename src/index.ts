@@ -126,7 +126,7 @@ function transformGA4ToAnalytics(ga4Data) {
   if (eventName && eventName !== "page_view") {
     analytics.event_name = eventName;
     
-    if (eventName === "purchase" || eventName === "orderCompleted") {
+    if (eventName === "purchase" || eventName === "orderCompleted" || eventName === "resub") {  // R-1: resub uses the purchase field mapping
       analytics.event_value = ga4Data.event_value || ga4Data.value || ga4Data.transactionTotal;
       analytics.metadata = {
         transaction_id: ga4Data.transaction_id || ga4Data.transactionId,

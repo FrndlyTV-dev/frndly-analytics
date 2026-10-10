@@ -6,6 +6,10 @@
 //           and forwards to GTM Server (prod.gtm.frndlytv.com)
 //
 // Patch log (latest first):
+//   2026-10-10  R-1: web reactivations. dataLayer 'resubOrderCompleted' (signup
+//               orderContext) -> its own event 'resub', deduped per transaction_id,
+//               mirrored to frndly-analytics (Analytics Engine). NOT forwarded to
+//               sGTM / ad-platform tags unless FORWARD_RESUB_TO_SGTM = true.
 //   2026-09-05  Phase 1 of CHANGE-LIST.md: domain-wide identity/session cookies,
 //               _ss/_fv/seg/_s flags, gcs layout fix + undetermined-consent policy,
 //               gtag ecommerce (uid/cu/pr1..N), campaign overrides only from URL,
@@ -122,6 +126,13 @@ async function handleRequest(request, event) {
       // Constants for GTM server and measurement ID
       const measurementId = 'G-94LMWQ1X74'; // Your GA4 measurement ID
       const gtmServerEndpoint = 'https://prod.gtm.frndlytv.com/g/collect';
+
+      // ADDED R-1: resubs are first-party only by default. false = recorded in
+      // frndly-analytics-db via the mirror below, never sent to sGTM, so no
+      // ad-platform conversion tag can fire on a resub. true = forward as en=resub
+      // with the same ecommerce params as purchase (sGTM triggers keyed on
+      // en=purchase still won't fire unless you add resub to them).
+      const FORWARD_RESUB_TO_SGTM = false;
 
       // Extract information from request headers
       const userAgent = request.headers.get('User-Agent') || jsonData.user_agent || 'Cloudflare-Worker';
@@ -310,7 +321,7 @@ async function handleRequest(request, event) {
       }
 
       // Handle e-commerce purchase event specifically
-      if (eventName === 'purchase' || eventName === 'orderCompleted') {
+      if (eventName === 'purchase' || eventName === 'orderCompleted' || eventName === 'resub') {   // EDIT R-1: + resub
         // Required purchase parameters
         if (jsonData.transaction_id || jsonData.transactionId) {
           gaUrl += `&ep.transaction_id=${encodeURIComponent(jsonData.transaction_id || jsonData.transactionId)}`;
@@ -478,15 +489,23 @@ async function handleRequest(request, event) {
       console.log('GA4 URL:', gaUrl.replace(/cid=[^&]+/, 'cid=...'));   // ADDED W-8: search Workers Logs for "_ss=1", "gcs=G1", "pr1="
 
       // Forward to GTM Server with POST method
-      const proxyResponse = await fetch(gaUrl, {
-        method: 'POST',
-        headers: outboundHeaders          // EDIT W-5: was the inline headers object
-      });
+      // EDIT R-1: resubs skip sGTM unless FORWARD_RESUB_TO_SGTM; they still go
+      // to the analytics-DB mirror below. gaStatus is 'skipped' when not sent.
+      const forwardToSgtm = eventName !== 'resub' || FORWARD_RESUB_TO_SGTM;
+      let responseStatus = 'skipped';
+      if (forwardToSgtm) {
+        const proxyResponse = await fetch(gaUrl, {
+          method: 'POST',
+          headers: outboundHeaders          // EDIT W-5: was the inline headers object
+        });
 
-      // Log the response for debugging
-      const responseStatus = proxyResponse.status;
-      const responseText = await proxyResponse.text();
-      console.log(`GA4 response: ${responseStatus}`, responseText);
+        // Log the response for debugging
+        responseStatus = proxyResponse.status;
+        const responseText = await proxyResponse.text();
+        console.log(`GA4 response: ${responseStatus}`, responseText);
+      } else {
+        console.log('resub: sGTM forward skipped (FORWARD_RESUB_TO_SGTM = false)');
+      }
 
       // ALSO send to our analytics database.
       // Handed to event.waitUntil() so the user-visible response returns
@@ -1112,6 +1131,57 @@ async function handleRequest(request, event) {
         });
       }
 
+      // ADDED R-1: web reactivation ("resub"). signup.frndlytv.com pushes
+      // { event: 'resubOrderCompleted', transactionId, referenceId, transactionTotal,
+      // transactionProducts } (contexts/orderContext.jsx) and then immediately sets
+      // window.location to /resub-confirmation. sendEvent() uses keepalive, so the
+      // POST survives that navigation. Sent under its own event name ('resub'),
+      // never as 'purchase', so new-customer counts and purchase-keyed tags are
+      // untouched. Dedupe reuses the purchase Set + sessionStorage with a
+      // 'resub:' prefix so the two event types can never suppress each other.
+      function sendResub(resubData) {
+        if (!resubData) {
+          console.error('Resub data is required for resub events');
+          return Promise.reject(new Error('Resub data is required'));
+        }
+
+        var resolvedTxnId = resubData.transactionId || resubData.transaction_id;
+        if (resolvedTxnId) {
+          var dedupeKey = 'resub:' + resolvedTxnId;
+          if (firedTransactionIds.has(dedupeKey)) {
+            console.warn('Duplicate resub suppressed for transaction_id:', resolvedTxnId);
+            return Promise.resolve({ success: true, deduped: true, transaction_id: resolvedTxnId });
+          }
+          firedTransactionIds.add(dedupeKey);
+          persistFiredTxns();
+        } else {
+          console.warn('Resub event has no transaction_id; cannot dedupe.');
+        }
+
+        // payload.params becomes frndly-analytics 'metadata' for non-purchase
+        // events: blob11 transaction_id, blob12 frndly_id, blob13 reference_id,
+        // blob15 currency. Root 'value' becomes double1.
+        var resubParams = {
+          transaction_id: resolvedTxnId,
+          value: resubData.transactionTotal || resubData.value || resubData.revenue,
+          currency: resubData.currency || 'USD',
+          reference_id: resubData.referenceId || resubData.reference_id,
+          frndly_id: resubData.frndlyId || resubData.frndly_id,
+          items: resubData.transactionProducts || resubData.items
+        };
+
+        console.log('Resub payload:', JSON.stringify(resubParams, null, 2));
+
+        return sendEvent('resub', resubParams, undefined, {
+          transaction_id: resubParams.transaction_id,
+          value: resubParams.value,
+          currency: resubParams.currency,
+          reference_id: resubParams.reference_id,
+          frndly_id: resubParams.frndly_id,
+          items: resubParams.items
+        });
+      }
+
       // Track page visibility changes
       function setupVisibilityTracking() {
         var startTime, visibilityTime = 0;
@@ -1214,6 +1284,9 @@ async function handleRequest(request, event) {
               console.log('Google conversion cookies at purchase time:', getGoogleConversionCookies());
 
               sendPurchase(event);
+            } else if (event && event.event === 'resubOrderCompleted') {   // ADDED R-1
+              console.log('Found resubOrderCompleted event in dataLayer!', JSON.stringify(event, null, 2));
+              sendResub(event);
             }
           });
         } else {
@@ -1241,6 +1314,9 @@ async function handleRequest(request, event) {
             console.log('Google conversion cookies at purchase time:', getGoogleConversionCookies());
 
             sendPurchase(arguments[0]);
+          } else if (arguments[0] && arguments[0].event === 'resubOrderCompleted') {   // ADDED R-1
+            console.log('RESUB EVENT CAPTURED!', JSON.stringify(arguments[0], null, 2));
+            sendResub(arguments[0]);
           }
 
           return result;
